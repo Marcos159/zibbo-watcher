@@ -1,0 +1,66 @@
+name: Zibbo Watcher
+
+on:
+  schedule:
+    # Twitch: cada 10 min (es gratis consultar).
+    - cron: "*/10 * * * *"
+    # YouTube: dos veces por hora → 48 búsquedas/día = 4.800 de las 10.000 unidades.
+    - cron: "5,35 * * * *"
+  # Botón "Run workflow" en la pestaña Actions para probar a mano (consulta ambas).
+  workflow_dispatch:
+
+permissions:
+  contents: write # para guardar state.json en el repo
+
+# Las ejecuciones se ponen en cola en vez de pisarse al escribir state.json
+concurrency:
+  group: zibbo-watcher
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Comprobar Twitch / YouTube
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_MENTION: ${{ vars.DISCORD_MENTION }}
+          TWITCH_CLIENT_ID: ${{ secrets.TWITCH_CLIENT_ID }}
+          TWITCH_CLIENT_SECRET: ${{ secrets.TWITCH_CLIENT_SECRET }}
+          TWITCH_GAME_ID: ${{ vars.TWITCH_GAME_ID }}
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+          STATE_FILE: state.json
+        run: |
+          case "${{ github.event.schedule }}" in
+            "*/10 * * * *") python zibbo_watcher.py --once --only twitch ;;
+            "5,35 * * * *") python zibbo_watcher.py --once --only youtube ;;
+            *)              python zibbo_watcher.py --once ;;
+          esac
+
+      - name: Guardar estado
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          [ -f state.json ] && git add state.json
+
+          if ! git diff --cached --quiet; then
+            git commit -m "Actualizar estado del watcher"
+          elif [ $(( $(date +%s) - $(git log -1 --format=%ct) )) -gt $(( 50 * 86400 )) ]; then
+            # GitHub desactiva los cron de repos públicos tras 60 días sin actividad
+            git commit --allow-empty -m "keepalive"
+          else
+            exit 0
+          fi
+
+          git push || (git pull --rebase && git push)
