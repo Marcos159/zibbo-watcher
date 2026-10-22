@@ -52,7 +52,8 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          [ -f state.json ] && git add state.json
+          [ -f state.json ] || exit 0
+          git add state.json
 
           if ! git diff --cached --quiet; then
             git commit -m "Actualizar estado del watcher"
@@ -63,4 +64,13 @@ jobs:
             exit 0
           fi
 
-          git push || (git pull --rebase && git push)
+          # Si otra ejecución guardó antes, se fusionan ambos estados (unión de IDs) y se reintenta
+          for intento in 1 2 3; do
+            git push && exit 0
+            echo "Push rechazado; fusionando con el estado remoto (intento $intento)"
+            cp state.json "$RUNNER_TEMP/mio.json"
+            git fetch origin "$GITHUB_REF_NAME"
+            git reset --hard "origin/$GITHUB_REF_NAME"
+            [ -f state.json ] || echo '{}' > state.json
+            jq -s '.[0] * .[1]' state.json "$RUNNER_TEMP/mio.json" > "$RUNNER_TEMP/fusion.json"
+            mv
