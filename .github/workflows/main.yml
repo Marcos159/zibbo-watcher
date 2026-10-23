@@ -2,17 +2,15 @@ name: Zibbo Watcher
 
 on:
   schedule:
-    # Twitch: cada 10 min (es gratis consultar).
+    # Repo privado: cambia a "*/30 * * * *" para no pasarte de los 2.000 min/mes.
     - cron: "*/10 * * * *"
-    # YouTube: dos veces por hora → 48 búsquedas/día = 4.800 de las 10.000 unidades.
-    - cron: "5,35 * * * *"
-  # Botón "Run workflow" en la pestaña Actions para probar a mano (consulta ambas).
+  # Botón "Run workflow" y disparador externo (cron-job.org)
   workflow_dispatch:
 
 permissions:
-  contents: write # para guardar state.json en el repo
+  contents: write # solo para el commit de keepalive
 
-# Las ejecuciones se ponen en cola en vez de pisarse al escribir state.json
+# Nunca dos ejecuciones a la vez: la segunda espera a que termine la primera
 concurrency:
   group: zibbo-watcher
   cancel-in-progress: false
@@ -31,6 +29,14 @@ jobs:
 
       - run: pip install -r requirements.txt
 
+      # El estado (qué se ha anunciado ya) vive en la caché de Actions, no en el repo
+      - name: Recuperar estado
+        uses: actions/cache/restore@v4
+        with:
+          path: .zibbo-state
+          key: zibbo-state-${{ github.run_id }}
+          restore-keys: zibbo-state-
+
       - name: Comprobar Twitch / YouTube
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
@@ -39,38 +45,25 @@ jobs:
           TWITCH_CLIENT_SECRET: ${{ secrets.TWITCH_CLIENT_SECRET }}
           TWITCH_GAME_ID: ${{ vars.TWITCH_GAME_ID }}
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
-          STATE_FILE: state.json
-        run: |
-          case "${{ github.event.schedule }}" in
-            "*/10 * * * *") python zibbo_watcher.py --once --only twitch ;;
-            "5,35 * * * *") python zibbo_watcher.py --once --only youtube ;;
-            *)              python zibbo_watcher.py --once ;;
-          esac
+          # Twitch se mira en cada ejecución; YouTube como mucho cada 30 min (48 búsquedas/día)
+          YOUTUBE_INTERVAL_SECONDS: "1800"
+          STATE_FILE: .zibbo-state/state.json
+        run: python zibbo_watcher.py --once
 
       - name: Guardar estado
         if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .zibbo-state
+          key: zibbo-state-${{ github.run_id }}-${{ github.run_attempt }}
+
+      # GitHub desactiva los cron de repos públicos tras 60 días sin commits
+      - name: Keepalive
+        if: always()
+        continue-on-error: true
         run: |
+          [ $(( $(date +%s) - $(git log -1 --format=%ct) )) -lt 4320000 ] && exit 0
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          [ -f state.json ] || exit 0
-          git add state.json
-
-          if ! git diff --cached --quiet; then
-            git commit -m "Actualizar estado del watcher"
-          elif [ $(( $(date +%s) - $(git log -1 --format=%ct) )) -gt $(( 50 * 86400 )) ]; then
-            # GitHub desactiva los cron de repos públicos tras 60 días sin actividad
-            git commit --allow-empty -m "keepalive"
-          else
-            exit 0
-          fi
-
-          # Si otra ejecución guardó antes, se fusionan ambos estados (unión de IDs) y se reintenta
-          for intento in 1 2 3; do
-            git push && exit 0
-            echo "Push rechazado; fusionando con el estado remoto (intento $intento)"
-            cp state.json "$RUNNER_TEMP/mio.json"
-            git fetch origin "$GITHUB_REF_NAME"
-            git reset --hard "origin/$GITHUB_REF_NAME"
-            [ -f state.json ] || echo '{}' > state.json
-            jq -s '.[0] * .[1]' state.json "$RUNNER_TEMP/mio.json" > "$RUNNER_TEMP/fusion.json"
-            mv
+          git commit --allow-empty -m "keepalive"
+          git push
