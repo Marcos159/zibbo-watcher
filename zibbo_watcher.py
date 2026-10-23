@@ -75,7 +75,7 @@ class State:
 
     def __init__(self, path: Path):
         self.path = path
-        self.data: dict = {"twitch": {}, "youtube": {}, "seeded": {}}
+        self.data: dict = {"twitch": {}, "youtube": {}, "seeded": {}, "last_check": {}}
         if path.exists():
             try:
                 self.data.update(json.loads(path.read_text(encoding="utf-8")))
@@ -94,7 +94,14 @@ class State:
     def set_seeded(self, source: str) -> None:
         self.data["seeded"][source] = True
 
+    def last_check(self, source: str) -> float:
+        return float(self.data["last_check"].get(source, 0))
+
+    def set_last_check(self, source: str) -> None:
+        self.data["last_check"][source] = time.time()
+
     def save(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         cutoff = time.time() - SEEN_TTL_DAYS * 86400
         for source in ("twitch", "youtube"):
             self.data[source] = {k: v for k, v in self.data[source].items() if v >= cutoff}
@@ -297,10 +304,20 @@ def youtube_embed(item: dict) -> dict:
 
 
 def check_youtube(state: State) -> None:
-    items = youtube_search()
+    # Cada búsqueda cuesta 100 unidades de cuota: se respeta el intervalo aunque el
+    # script se lance más a menudo (cron de GitHub, disparador externo, a mano...).
+    # Margen de 60 s para absorber la imprecisión de los disparadores.
+    elapsed = time.time() - state.last_check("youtube")
+    if elapsed < YOUTUBE_INTERVAL - 60:
+        log.info("YouTube: próxima búsqueda en %d min", (YOUTUBE_INTERVAL - elapsed) // 60 + 1)
+        return
+
+    state.set_last_check("youtube")  # se cuenta el intento aunque falle: la cuota ya se gastó
     first_run = not state.is_seeded("youtube")
     announced = 0
+    items: list[dict] = []
     try:
+        items = youtube_search()
         for item in items:
             video_id = item["id"]["videoId"]
             if state.seen("youtube", video_id):
